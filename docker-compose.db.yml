@@ -1,0 +1,25 @@
+# Same Postgres as the `docker run` in the README, as a compose file.
+#   docker compose -f docker-compose.db.yml up -d
+# Matches the credentials already set in api-python/.env and api-node/.env.
+services:
+  postgres:
+    image: postgres:16
+    container_name: postgres-test
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: "1234"
+      POSTGRES_DB: testdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_test_data:
+    external: true
