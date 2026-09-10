@@ -8,6 +8,7 @@
  * Browsable in a plain browser:
  *   /            human-readable HTML status page (auto-refreshes)
  *   /health      liveness JSON, never touches the DB
+ *   /admin/ready flips the in-memory readiness flag /health reports on
  *   /api/info    service metadata JSON
  *   /api/db      DB clock + heartbeat rows JSON
  */
@@ -64,6 +65,7 @@ function describe(err) {
 }
 
 const state = {
+  ready: true,
   dbOk: false,
   dbError: null,
   tableReady: false,
@@ -331,8 +333,16 @@ app.get('/', async (_req, res) => {
   res.type('html').send(renderPage(buildInfo(), await buildDb()));
 });
 
-/** Liveness only - does not touch the DB. */
-app.get('/health', (_req, res) => res.json({ status: 'ok', service: SERVICE_NAME }));
+/** Liveness + readiness - does not touch the DB. Fails when /admin/ready has flipped the flag off. */
+app.get('/health', (_req, res) => {
+  res.status(state.ready ? 200 : 503).json({ status: state.ready ? 'ok' : 'error', service: SERVICE_NAME });
+});
+
+/** Admin: flips the readiness flag that /health reports on. No auth - lab use only. */
+app.get('/admin/ready', (_req, res) => {
+  state.ready = !state.ready;
+  res.json({ ready: state.ready });
+});
 
 app.get('/api/info', (_req, res) => res.json(buildInfo()));
 
