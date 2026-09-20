@@ -49,6 +49,9 @@ DB_SSLMODE = os.getenv("DB_SSLMODE", "prefer")
 # A long timeout here makes /api/db look like a dead API to any HTTP client.
 DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "3"))
 
+COMMIT_SHA = os.getenv("COMMIT_SHA", "unknown")
+BUILD_TIME = os.getenv("BUILD_TIME", "unknown")
+
 TABLE = "py_heartbeat"
 
 # Passed as keyword args rather than a "host=... password=..." conninfo string:
@@ -157,8 +160,17 @@ class PrettyJSON(JSONResponse):
     def render(self, content) -> bytes:
         return json.dumps(content, indent=2, default=str).encode("utf-8")
 
+# Get API_PREFIX from environment, empty string for local dev (no prefix)
+API_PREFIX = os.getenv("API_PREFIX", "")
 
-app = FastAPI(title=SERVICE_NAME, lifespan=lifespan, default_response_class=PrettyJSON)
+
+app = FastAPI(
+    title=SERVICE_NAME, 
+    lifespan=lifespan, 
+    default_response_class=PrettyJSON,
+    root_path=API_PREFIX  # ADD THIS
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in CORS_ORIGINS.split(",")],
@@ -178,6 +190,8 @@ def build_info() -> dict:
         "db_target": DB_TARGET,
         "heartbeat_seconds": HEARTBEAT_SECONDS,
         "started_at": state["started_at"],
+        "commit_sha": COMMIT_SHA,      # ADD THIS
+        "build_time": BUILD_TIME,      # ADD THIS
     }
 
 

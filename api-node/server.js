@@ -31,6 +31,8 @@ const {
   DB_PASSWORD = '1234',
   DB_SSL = 'false',
   DB_CONNECT_TIMEOUT = '3',
+  COMMIT_SHA = 'unknown',          // ADD THIS
+  BUILD_TIME = 'unknown',          // ADD THIS
 } = process.env;
 
 // The table that this service owns in Postgres. The FastAPI service has its own
@@ -148,6 +150,8 @@ function buildInfo() {
     db_target: DB_TARGET,
     heartbeat_seconds: Number(HEARTBEAT_SECONDS),
     started_at: state.startedAt,
+    commit_sha: COMMIT_SHA,         // ADD THIS
+    build_time: BUILD_TIME,         // ADD THIS
   };
 }
 
@@ -329,6 +333,12 @@ function renderPage(info, db) {
 }
 
 // ------------------------------------------------------------- endpoints ----
+// Get API_PREFIX from environment, empty string for local dev (no prefix)
+const PREFIX = process.env.API_PREFIX || '';
+
+// Create a router for all the routes
+const router = express.Router();
+
 const app = express();
 app.set('json spaces', 2); // readable when opened straight in a browser
 app.use(
@@ -336,7 +346,7 @@ app.use(
 );
 
 /** Human-readable status page - just browse to the service root. */
-app.get('/', async (_req, res) => {
+router.get('/', async (_req, res) => {
   res.type('html').send(renderPage(buildInfo(), await buildDb()));
 });
 
@@ -345,7 +355,7 @@ app.get('/', async (_req, res) => {
 //   res.status(state.ready ? 200 : 503).json({ status: state.ready ? 'ok' : 'error', service: SERVICE_NAME });
 // });
 /** Liveness + readiness - does not touch the DB. Fails when /admin/ready has flipped the flag off or shutdown has started. */
-app.get('/health', (_req, res) => {
+router.get('/health', (_req, res) => {
   if (shuttingDown) {
     return res.status(503).json({
       status: 'shutting down',
@@ -360,15 +370,18 @@ app.get('/health', (_req, res) => {
 });
 
 /** Admin: flips the readiness flag that /health reports on. No auth - lab use only. */
-app.get('/admin/ready', (_req, res) => {
+router.get('/admin/ready', (_req, res) => {
   state.ready = !state.ready;
   res.json({ ready: state.ready });
 });
 
-app.get('/api/info', (_req, res) => res.json(buildInfo()));
+router.get('/api/info', (_req, res) => res.json(buildInfo()));
 
 /** DB clock + persistent-state proof. Always 200, even when the DB is down. */
-app.get('/api/db', async (_req, res) => res.json(await buildDb()));
+router.get('/api/db', async (_req, res) => res.json(await buildDb()));
+
+// Mount the router with the PREFIX
+app.use(PREFIX, router);
 
 
 // app.listen(PORT, '0.0.0.0', () => {
