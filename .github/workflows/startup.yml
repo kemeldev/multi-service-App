@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300e6ec4b3c7b3f34b9b65ce2d2d8
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.LAB4_TEARDOWN_KEY_ID }}
           aws-secret-access-key: ${{ secrets.LAB4_TEARDOWN_SECRET }}
