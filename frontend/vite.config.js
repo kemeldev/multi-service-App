@@ -15,5 +15,10 @@ export default defineConfig(({ mode }) => {
       port: Number(env.APP_PORT || 5173),
       strictPort: true,
     },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      setupFiles: './tests/setup.js',
+    },
   };
 });

@@ -16,6 +16,7 @@ import express from 'express';
 import cors from 'cors';
 import pg from 'pg';
 import os from 'node:os';
+import { pathToFileURL } from 'node:url';
 import 'dotenv/config';
 
 // Load configuration from environment variables, with defaults for local dev.
@@ -34,6 +35,11 @@ const {
   COMMIT_SHA = 'unknown',          // ADD THIS
   BUILD_TIME = 'unknown',          // ADD THIS
 } = process.env;
+
+// Lets tests disable the background heartbeat loop (no Postgres in CI, and the
+// retry/connect-error noise would otherwise drown out real test failures).
+// Defaults to on so production needs no extra configuration.
+const HEARTBEAT_ENABLED = (process.env.HEARTBEAT_ENABLED || 'true').toLowerCase() === 'true';
 
 // The table that this service owns in Postgres. The FastAPI service has its own
 const TABLE = 'node_heartbeat';
@@ -383,6 +389,9 @@ router.get('/api/db', async (_req, res) => res.json(await buildDb()));
 // Mount the router with the PREFIX
 app.use(PREFIX, router);
 
+// Exposed so CI/test files can `import app from './server.js'` and drive it
+// with supertest without binding a real port (see the `import.meta.url` guard below).
+export default app;
 
 // app.listen(PORT, '0.0.0.0', () => {
 //   console.log(`[${SERVICE_NAME}] listening on http://0.0.0.0:${PORT}`);
@@ -393,62 +402,70 @@ app.use(PREFIX, router);
 // ---------------------------------------------------------------
 // Start server + graceful shutdown
 // ---------------------------------------------------------------
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[${SERVICE_NAME}] listening on http://0.0.0.0:${PORT}`);
-  console.log(`[${SERVICE_NAME}] db target ${DB_TARGET}`);
+// Only runs when this file is executed directly (`node server.js` / `npm start`),
+// not when another file imports the default export above.
+// (pathToFileURL, not a template string, so this also matches correctly on
+// Windows, where process.argv[1] uses backslashes but import.meta.url does not.)
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[${SERVICE_NAME}] listening on http://0.0.0.0:${PORT}`);
+    console.log(`[${SERVICE_NAME}] db target ${DB_TARGET}`);
 
-  heartbeat();
-  heartbeatTimer = setInterval(heartbeat, TICK_MS);
-});
-
-// Make sure idle keep-alive connections do not outlive us.
-// Without this, server.close() can wait a long time for connections
-// that are open but not carrying a request.
-server.keepAliveTimeout = 5000;
-server.headersTimeout = 6000;
-
-function shutdown(signal) {
-  if (shuttingDown) return;
-
-  shuttingDown = true;
-  state.ready = false;
-
-  console.log(`[shutdown] ${signal} received, draining connections`);
-
-  // Stop the background heartbeat loop.
-  if (heartbeatTimer) {
-    clearInterval(heartbeatTimer);
-  }
-
-  // Stop accepting new connections. The callback runs once existing
-  // active requests have finished.
-  server.close(async () => {
-    console.log('[shutdown] all HTTP connections closed');
-
-    try {
-      await pool.end();
-      console.log('[shutdown] Postgres pool closed');
-    } catch (err) {
-      console.log(`[shutdown] error closing Postgres pool: ${describe(err)}`);
+    if (HEARTBEAT_ENABLED) {
+      heartbeat();
+      heartbeatTimer = setInterval(heartbeat, TICK_MS);
     }
-
-    console.log('[shutdown] exiting cleanly');
-    process.exit(0);
   });
 
-  // Close idle keep-alive connections so server.close() does not wait on them.
-  // Available in Node 18.2 and later.
-  if (typeof server.closeIdleConnections === 'function') {
-    server.closeIdleConnections();
+  // Make sure idle keep-alive connections do not outlive us.
+  // Without this, server.close() can wait a long time for connections
+  // that are open but not carrying a request.
+  server.keepAliveTimeout = 5000;
+  server.headersTimeout = 6000;
+
+  function shutdown(signal) {
+    if (shuttingDown) return;
+
+    shuttingDown = true;
+    state.ready = false;
+
+    console.log(`[shutdown] ${signal} received, draining connections`);
+
+    // Stop the background heartbeat loop.
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+    }
+
+    // Stop accepting new connections. The callback runs once existing
+    // active requests have finished.
+    server.close(async () => {
+      console.log('[shutdown] all HTTP connections closed');
+
+      try {
+        await pool.end();
+        console.log('[shutdown] Postgres pool closed');
+      } catch (err) {
+        console.log(`[shutdown] error closing Postgres pool: ${describe(err)}`);
+      }
+
+      console.log('[shutdown] exiting cleanly');
+      process.exit(0);
+    });
+
+    // Close idle keep-alive connections so server.close() does not wait on them.
+    // Available in Node 18.2 and later.
+    if (typeof server.closeIdleConnections === 'function') {
+      server.closeIdleConnections();
+    }
+
+    // Safety net. This must be shorter than terminationGracePeriodSeconds
+    // in the Kubernetes Deployment.
+    setTimeout(() => {
+      console.log('[shutdown] drain timed out, forcing exit');
+      process.exit(0);
+    }, 15000).unref();
   }
 
-  // Safety net. This must be shorter than terminationGracePeriodSeconds
-  // in the Kubernetes Deployment.
-  setTimeout(() => {
-    console.log('[shutdown] drain timed out, forcing exit');
-    process.exit(0);
-  }, 15000).unref();
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
-
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));

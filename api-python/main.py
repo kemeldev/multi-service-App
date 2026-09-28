@@ -12,22 +12,22 @@ Browsable in a plain browser:
     /api/info    service metadata JSON
     /api/db      DB clock + heartbeat rows JSON
 """
-import os
-import time
-import json
-import html
 import asyncio
-import socket
+import html
+import json
+import os
 import platform
+import socket
+import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import psycopg
-from psycopg.rows import dict_row
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
+from psycopg.rows import dict_row
 
 load_dotenv()
 
@@ -51,6 +51,11 @@ DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "3"))
 
 COMMIT_SHA = os.getenv("COMMIT_SHA", "unknown")
 BUILD_TIME = os.getenv("BUILD_TIME", "unknown")
+
+# Lets tests disable the background heartbeat loop (no Postgres in CI, and the
+# retry/connect-error noise would otherwise drown out real test failures).
+# Defaults to on so production needs no extra configuration.
+HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "true").lower() == "true"
 
 TABLE = "py_heartbeat"
 
@@ -79,7 +84,7 @@ state = {
     "writes_failed": 0,
     "last_write_at": None,
     "last_fail_at": 0.0,  # time.monotonic() of the last failed connect
-    "started_at": datetime.now(timezone.utc).isoformat(),
+    "started_at": datetime.now(UTC).isoformat(),
 }
 
 
@@ -149,9 +154,10 @@ async def heartbeat_loop():
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    task = asyncio.create_task(heartbeat_loop())
+    task = asyncio.create_task(heartbeat_loop()) if HEARTBEAT_ENABLED else None
     yield
-    task.cancel()
+    if task:
+        task.cancel()
 
 
 class PrettyJSON(JSONResponse):
@@ -165,8 +171,8 @@ API_PREFIX = os.getenv("API_PREFIX", "")
 
 
 app = FastAPI(
-    title=SERVICE_NAME, 
-    lifespan=lifespan, 
+    title=SERVICE_NAME,
+    lifespan=lifespan,
     default_response_class=PrettyJSON,
     root_path=API_PREFIX  # ADD THIS
 )
@@ -291,10 +297,8 @@ nav a:hover{border-color:var(--accent)}
 
 def _rows(pairs) -> str:
     return "".join(
-        '<div class="row"><span class="k">{}</span>'
-        '<span class="v mono">{}</span></div>'.format(
-            html.escape(str(k)), html.escape(str(v))
-        )
+        f'<div class="row"><span class="k">{html.escape(str(k))}</span>'
+        f'<span class="v mono">{html.escape(str(v))}</span></div>'
         for k, v in pairs
     )
 
@@ -329,7 +333,7 @@ def _db_block(db: dict) -> str:
             )
             + '<div class="tw"><table><thead><tr><th>id</th><th>host</th>'
             "<th>message</th><th>created_at</th></tr></thead>"
-            "<tbody>{}</tbody></table></div>".format(recent)
+            f"<tbody>{recent}</tbody></table></div>"
         )
 
     err = (
