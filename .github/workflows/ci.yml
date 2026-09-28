@@ -4,7 +4,6 @@ on:
   pull_request:
   push:
     branches: [main]
-#     branches: [lab4/ci-lint-and-test]
 
 permissions:
   contents: read
@@ -14,8 +13,67 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: detect changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      node: ${{ steps.filter.outputs.node }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Work out which services changed
+        id: filter
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags origin "${{ github.base_ref }}"
+            CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          else
+            # On a push to main, verify everything. Cheap insurance.
+            CHANGED=$(git ls-files)
+          fi
+
+          echo "--- changed files ---"
+          echo "$CHANGED"
+          echo "---------------------"
+
+          # A change to CI itself revalidates everything.
+          if echo "$CHANGED" | grep -qE '^\.github/workflows/'; then
+            echo "CI config changed - running everything"
+            CHANGED=$(git ls-files)
+          fi
+
+          emit () {
+            if echo "$CHANGED" | grep -qE "$2"; then
+              echo "$1=true"  >> "$GITHUB_OUTPUT"
+            else
+              echo "$1=false" >> "$GITHUB_OUTPUT"
+            fi
+          }
+
+          emit python   '^api-python/'
+          emit node     '^api-node/'
+          emit frontend '^frontend/'
+
+      - name: Summary
+        run: |
+          {
+            echo "### Services to verify"
+            echo "- api-python: ${{ steps.filter.outputs.python }}"
+            echo "- api-node: ${{ steps.filter.outputs.node }}"
+            echo "- frontend: ${{ steps.filter.outputs.frontend }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   python:
     name: api-python
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -23,24 +81,19 @@ jobs:
         working-directory: api-python
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: api-python/requirements-dev.txt
-
-      - name: Install dependencies
-        run: pip install -r requirements-dev.txt
-
-      - name: Lint
-        run: ruff check .
-
-      - name: Test
-        run: pytest
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: pytest
 
   node:
     name: api-node
+    needs: changes
+    if: needs.changes.outputs.node == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -48,24 +101,19 @@ jobs:
         working-directory: api-node
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: api-node/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Test
-        run: npm test
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
 
   frontend:
     name: frontend
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -73,22 +121,31 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Test
-        run: npm test
-
-      - name: Build
-        run: npm run build
-
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [changes, python, node, frontend]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fail if anything failed or was cancelled
+        run: |
+          RESULTS="${{ join(needs.*.result, ' ') }}"
+          echo "job results: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              echo "A required job did not succeed."
+              exit 1
+            fi
+          done
+          echo "All required jobs succeeded or were skipped."
