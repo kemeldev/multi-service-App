@@ -3,8 +3,8 @@ name: CI
 on:
   pull_request:
   push:
-#     branches: [main]
-    branches: [lab4/ci-lint-and-test]
+    branches: [main]
+#     branches: [lab4/ci-lint-and-test]
 
 permissions:
   contents: read
