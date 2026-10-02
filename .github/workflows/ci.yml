@@ -258,7 +258,7 @@ jobs:
           path: /tmp/${{ matrix.service.name }}.tar.gz
           retention-days: 1
 
-   verify-artifact:
+  verify-artifact:
     name: verify built artifact
     needs: [changes, build]
     if: needs.changes.outputs.any == 'true'
