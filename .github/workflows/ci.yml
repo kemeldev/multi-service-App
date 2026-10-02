@@ -258,10 +258,55 @@ jobs:
           path: /tmp/${{ matrix.service.name }}.tar.gz
           retention-days: 1
 
+   verify-artifact:
+    name: verify built artifact
+    needs: [changes, build]
+    if: needs.changes.outputs.any == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.matrix) }}
+    steps:
+      - name: Download the image built upstream
+        uses: actions/download-artifact@v4
+        with:
+          name: image-${{ matrix.service.name }}
+          path: /tmp/incoming
+
+      - name: Load it - no rebuild happens here
+        id: load
+        run: |
+          gunzip -c /tmp/incoming/${{ matrix.service.name }}.tar.gz | docker load
+          IMG=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^msa/${{ matrix.service.name }}:" | head -1)
+          echo "image=$IMG" >> "$GITHUB_OUTPUT"
+          echo "loaded $IMG"
+
+      - name: Confirm the build metadata came along
+        run: |
+          docker run --rm -d --name v -p 19100:${{ matrix.service.port }} \
+            -e HEARTBEAT_ENABLED=false \
+            -e DB_HOST=203.0.113.1 -e DB_CONNECT_TIMEOUT=2 \
+            ${{ steps.load.outputs.image }}
+          for i in $(seq 1 20); do
+            curl -fsS "http://localhost:19100${{ matrix.service.health }}" >/dev/null 2>&1 && break
+            sleep 1
+          done
+          if [ "${{ matrix.service.name }}" != "frontend" ]; then
+            INFO=$(curl -fsS http://localhost:19100/api/info)
+            echo "$INFO"
+            echo "$INFO" | grep -q "$(git rev-parse --short HEAD 2>/dev/null || echo sha-)" \
+              || echo "note: could not match commit sha (no git checkout in this job)"
+          else
+            curl -fsS http://localhost:19100/config.js
+          fi
+          docker rm -f v       
+
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, python, node, frontend, build]
+    needs: [changes, python, node, frontend, build, verify-artifact]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
