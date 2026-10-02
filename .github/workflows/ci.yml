@@ -261,7 +261,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, python, node, frontend]
+    needs: [changes, python, node, frontend, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
