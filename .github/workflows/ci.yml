@@ -293,7 +293,7 @@ jobs:
 
       - name: Confirm the build metadata came along
         run: |
-          docker run --rm -d --name v -p 19100:${{ matrix.service.port }} \
+          docker run --rm -d --name verify-${{ matrix.service.name }} -p 19100:${{ matrix.service.port }} \
             -e HEARTBEAT_ENABLED=false \
             -e DB_HOST=203.0.113.1 -e DB_CONNECT_TIMEOUT=2 \
             ${{ steps.load.outputs.image }}
@@ -309,7 +309,7 @@ jobs:
           else
             curl -fsS http://localhost:19100/config.js
           fi
-          docker rm -f v
+          docker rm -f verify-${{ matrix.service.name }}
 
   system-test:
     name: system test
