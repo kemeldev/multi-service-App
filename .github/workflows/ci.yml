@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  TRIVY_VERSION: "0.75.0"
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -267,6 +270,45 @@ jobs:
           docker save msa/${{ matrix.service.name }}:${{ steps.ref.outputs.tag }} \
             | gzip > /tmp/${{ matrix.service.name }}.tar.gz
           ls -lh /tmp/${{ matrix.service.name }}.tar.gz
+
+      - name: Vulnerability report (does not fail)
+        run: |
+          IMG="msa/${{ matrix.service.name }}:${{ steps.ref.outputs.tag }}"
+          mkdir -p /tmp/scan
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /tmp/scan:/out aquasec/trivy:${TRIVY_VERSION} \
+            image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+            --format table --output /out/vulns.txt "$IMG"
+          cat /tmp/scan/vulns.txt
+          {
+            echo "### Vulnerabilities: ${{ matrix.service.name }}"
+            echo '```'
+            head -60 /tmp/scan/vulns.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate SBOM
+        run: |
+          IMG="msa/${{ matrix.service.name }}:${{ steps.ref.outputs.tag }}"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /tmp/scan:/out aquasec/trivy:${TRIVY_VERSION} \
+            image --format cyclonedx --output /out/sbom.json "$IMG"
+          ls -lh /tmp/scan/sbom.json
+
+      - name: Upload SBOM and report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom-${{ matrix.service.name }}
+          path: /tmp/scan/
+          retention-days: 30
+
+      - name: Block on fixable CRITICAL vulnerabilities
+        run: |
+          IMG="msa/${{ matrix.service.name }}:${{ steps.ref.outputs.tag }}"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:${TRIVY_VERSION} \
+            image --scanners vuln --severity CRITICAL --ignore-unfixed \
+            --exit-code 1 "$IMG"
 
       - name: Upload image artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
