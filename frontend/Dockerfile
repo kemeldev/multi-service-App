@@ -10,6 +10,7 @@ ENV VITE_PY_API=$VITE_PY_API VITE_NODE_API=$VITE_NODE_API VITE_POLL_MS=$VITE_POL
 RUN npm run build
 
 FROM nginx:1.27-alpine
+RUN apk update && apk upgrade --no-cache
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY config.js.template /usr/share/nginx/html/config.js.template
