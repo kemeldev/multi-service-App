@@ -67,7 +67,7 @@ jobs:
 
           consider api-python '^api-python/' 8001 /health  python
           consider api-node   '^api-node/'   8002 /health  node
-          consider frontend   '^frontend/'   8080 /healthz frontend
+          consider frontend   '^frontend/'   80 /healthz frontend
 
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
           if [ "$MATRIX" = "[]" ]; then
