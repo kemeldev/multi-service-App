@@ -424,4 +424,4 @@ jobs:
               exit 1
             fi
           done
-          echo "All required jobs succeeded or were skipped.."
+          echo "All required jobs succeeded or were skipped..."
