@@ -1,0 +1,31 @@
+name: msa-ci
+
+services:
+  api-python:
+    image: msa/api-python:${TAG}
+    environment:
+      HEARTBEAT_ENABLED: "false"
+      API_PREFIX: ""
+      DB_HOST: "203.0.113.1"
+      DB_CONNECT_TIMEOUT: "2"
+    ports:
+      - "8001:8001"
+
+  api-node:
+    image: msa/api-node:${TAG}
+    environment:
+      HEARTBEAT_ENABLED: "false"
+      API_PREFIX: ""
+      DB_HOST: "203.0.113.1"
+      DB_CONNECT_TIMEOUT: "2"
+    ports:
+      - "8002:8002"
+
+  frontend:
+    image: msa/frontend:${TAG}
+    environment:
+      PY_API: "/api/py"
+      NODE_API: "/api/node"
+      POLL_MS: "5000"
+    ports:
+      - "8080:80"

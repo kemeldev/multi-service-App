@@ -1,10 +1,18 @@
 import { useEffect, useState, useCallback } from 'react';
 
-const POLL_MS = Number(import.meta.env.VITE_POLL_MS || 5000);
+// const POLL_MS = Number(import.meta.env.VITE_POLL_MS || 5000);
+
+// const SERVICES = [
+//   { key: 'python', label: 'FastAPI (Python)', base: import.meta.env.VITE_PY_API || 'http://localhost:8001' },
+//   { key: 'node', label: 'Express (Node.js)', base: import.meta.env.VITE_NODE_API || 'http://localhost:8002' },
+// ];
+
+const cfg = window.__CONFIG__ || {};
+const POLL_MS = Number(cfg.POLL_MS || import.meta.env.VITE_POLL_MS || 5000);
 
 const SERVICES = [
-  { key: 'python', label: 'FastAPI (Python)', base: import.meta.env.VITE_PY_API || 'http://localhost:8001' },
-  { key: 'node', label: 'Express (Node.js)', base: import.meta.env.VITE_NODE_API || 'http://localhost:8002' },
+  { key: 'python', label: 'FastAPI (Python)', base: cfg.PY_API || import.meta.env.VITE_PY_API || 'http://localhost:8001' },
+  { key: 'node', label: 'Express (Node.js)', base: cfg.NODE_API || import.meta.env.VITE_NODE_API || 'http://localhost:8002' },
 ];
 
 /**

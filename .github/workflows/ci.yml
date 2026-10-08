@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches: [main]
@@ -21,6 +22,9 @@ jobs:
       python: ${{ steps.filter.outputs.python }}
       node: ${{ steps.filter.outputs.node }}
       frontend: ${{ steps.filter.outputs.frontend }}
+      matrix: ${{ steps.filter.outputs.matrix }}
+      any: ${{ steps.filter.outputs.any }}
+      all: ${{ steps.filter.outputs.all }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,7 +39,6 @@ jobs:
             git fetch --no-tags origin "${{ github.base_ref }}"
             CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
           else
-            # On a push to main, verify everything. Cheap insurance.
             CHANGED=$(git ls-files)
           fi
 
@@ -43,31 +46,50 @@ jobs:
           echo "$CHANGED"
           echo "---------------------"
 
-          # A change to CI itself revalidates everything.
           if echo "$CHANGED" | grep -qE '^\.github/workflows/'; then
             echo "CI config changed - running everything"
             CHANGED=$(git ls-files)
           fi
 
-          emit () {
-            if echo "$CHANGED" | grep -qE "$2"; then
-              echo "$1=true"  >> "$GITHUB_OUTPUT"
+          MATRIX='[]'
+
+          consider () {
+            NAME="$1"; PATTERN="$2"; PORT="$3"; HEALTH="$4"
+            if echo "$CHANGED" | grep -qE "$PATTERN"; then
+              echo "$5=true" >> "$GITHUB_OUTPUT"
+              MATRIX=$(printf '%s' "$MATRIX" | jq -c \
+                --arg n "$NAME" --arg h "$HEALTH" --argjson p "$PORT" \
+                '. + [{name:$n, port:$p, health:$h}]')
             else
-              echo "$1=false" >> "$GITHUB_OUTPUT"
+              echo "$5=false" >> "$GITHUB_OUTPUT"
             fi
           }
 
-          emit python   '^api-python/'
-          emit node     '^api-node/'
-          emit frontend '^frontend/'
+          consider api-python '^api-python/' 8001 /health  python
+          consider api-node   '^api-node/'   8002 /health  node
+          consider frontend   '^frontend/'   80 /healthz frontend
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          if [ "$MATRIX" = "[]" ]; then
+            echo "any=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "any=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "$(printf '%s' "$MATRIX" | jq 'length')" -eq 3 ]; then
+            echo "all=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "all=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Summary
         run: |
           {
-            echo "### Services to verify"
-            echo "- api-python: ${{ steps.filter.outputs.python }}"
-            echo "- api-node: ${{ steps.filter.outputs.node }}"
-            echo "- frontend: ${{ steps.filter.outputs.frontend }}"
+            echo "### Services selected"
+            echo '```json'
+            echo '${{ steps.filter.outputs.matrix }}'
+            echo '```'
+            echo "- all three changed: ${{ steps.filter.outputs.all }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   python:
@@ -131,10 +153,264 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  build:
+    name: build ${{ matrix.service.name }}
+    needs: changes
+    if: needs.changes.outputs.any == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.matrix) }}
+
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image reference
+        id: ref
+        run: |
+          SHORT=$(git rev-parse --short HEAD)
+          echo "tag=sha-$SHORT" >> "$GITHUB_OUTPUT"
+          echo "image=localhost:5000/msa/${{ matrix.service.name }}" >> "$GITHUB_OUTPUT"
+          echo "stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Lint the Dockerfile
+        run: |
+          docker run --rm -i -v "$PWD/.hadolint.yaml:/.hadolint.yaml:ro" \
+            hadolint/hadolint:latest-alpine hadolint --config /.hadolint.yaml - \
+            < ${{ matrix.service.name }}/Dockerfile
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: Build and push to the job-local registry
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service.name }}
+          push: true
+          tags: ${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.tag }}
+          build-args: |
+            COMMIT_SHA=${{ steps.ref.outputs.tag }}
+            BUILD_TIME=${{ steps.ref.outputs.stamp }}
+          cache-from: type=gha,scope=${{ matrix.service.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service.name }}
+          provenance: false
+
+      - name: Report the digest
+        run: |
+          echo "tag    : ${{ steps.ref.outputs.tag }}"
+          echo "digest : ${{ steps.build.outputs.digest }}"
+          {
+            echo "### ${{ matrix.service.name }}"
+            echo "- tag: \`${{ steps.ref.outputs.tag }}\`"
+            echo "- digest: \`${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Inspect the manifest
+        run: |
+          docker buildx imagetools inspect \
+            ${{ steps.ref.outputs.image }}@${{ steps.build.outputs.digest }}
+
+      - name: Pull by digest and check size and user
+        run: |
+          IMG="${{ steps.ref.outputs.image }}@${{ steps.build.outputs.digest }}"
+          docker pull "$IMG"
+          echo "--- size ---"
+          docker image inspect "$IMG" --format '{{.Size}}' | awk '{printf "%.1f MB\n", $1/1024/1024}'
+          echo "--- configured user ---"
+          docker image inspect "$IMG" --format 'User={{.Config.User}}'
+          test -n "$(docker image inspect "$IMG" --format '{{.Config.User}}')" \
+            || { echo "FAIL: image would run as root"; exit 1; }
+
+      - name: Smoke test the image
+        run: |
+          IMG="${{ steps.ref.outputs.image }}@${{ steps.build.outputs.digest }}"
+          docker run -d --name smoke -p 19000:${{ matrix.service.port }} \
+            -e HEARTBEAT_ENABLED=false \
+            -e DB_HOST=203.0.113.1 -e DB_CONNECT_TIMEOUT=2 \
+            "$IMG"
+          for i in $(seq 1 20); do
+            if curl -fsS "http://localhost:19000${{ matrix.service.health }}" >/dev/null 2>&1; then
+              echo "healthy after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS "http://localhost:19000${{ matrix.service.health }}"
+          echo
+          docker logs smoke | tail -20
+          docker rm -f smoke
+
+      - name: Save the image for downstream jobs
+        run: |
+          IMG="${{ steps.ref.outputs.image }}@${{ steps.build.outputs.digest }}"
+          docker tag "$IMG" msa/${{ matrix.service.name }}:${{ steps.ref.outputs.tag }}
+          docker save msa/${{ matrix.service.name }}:${{ steps.ref.outputs.tag }} \
+            | gzip > /tmp/${{ matrix.service.name }}.tar.gz
+          ls -lh /tmp/${{ matrix.service.name }}.tar.gz
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.service.name }}
+          path: /tmp/${{ matrix.service.name }}.tar.gz
+          retention-days: 1
+
+  verify-artifact:
+    name: verify built artifact
+    needs: [changes, build]
+    if: needs.changes.outputs.any == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.matrix) }}
+    steps:
+      - name: Download the image built upstream
+        uses: actions/download-artifact@v4
+        with:
+          name: image-${{ matrix.service.name }}
+          path: /tmp/incoming
+
+      - name: Load it - no rebuild happens here
+        id: load
+        run: |
+          gunzip -c /tmp/incoming/${{ matrix.service.name }}.tar.gz | docker load
+          IMG=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^msa/${{ matrix.service.name }}:" | head -1)
+          echo "image=$IMG" >> "$GITHUB_OUTPUT"
+          echo "loaded $IMG"
+
+      - name: Confirm the build metadata came along
+        run: |
+          docker run --rm -d --name verify-${{ matrix.service.name }} -p 19100:${{ matrix.service.port }} \
+            -e HEARTBEAT_ENABLED=false \
+            -e DB_HOST=203.0.113.1 -e DB_CONNECT_TIMEOUT=2 \
+            ${{ steps.load.outputs.image }}
+          for i in $(seq 1 20); do
+            curl -fsS "http://localhost:19100${{ matrix.service.health }}" >/dev/null 2>&1 && break
+            sleep 1
+          done
+          if [ "${{ matrix.service.name }}" != "frontend" ]; then
+            INFO=$(curl -fsS http://localhost:19100/api/info)
+            echo "$INFO"
+            echo "$INFO" | grep -q "$(git rev-parse --short HEAD 2>/dev/null || echo sha-)" \
+              || echo "note: could not match commit sha (no git checkout in this job)"
+          else
+            curl -fsS http://localhost:19100/config.js
+          fi
+          docker rm -f verify-${{ matrix.service.name }}
+
+  system-test:
+    name: system test
+    needs: [changes, build]
+    if: needs.changes.outputs.all == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all three images
+        uses: actions/download-artifact@v4
+        with:
+          pattern: image-*
+          path: /tmp/images
+          merge-multiple: true
+
+      - name: Load them - nothing is rebuilt here
+        run: |
+          for f in /tmp/images/*.tar.gz; do
+            echo "loading $f"
+            gunzip -c "$f" | docker load
+          done
+          docker images --format '{{.Repository}}:{{.Tag}}' | grep '^msa/'
+
+      - name: Start the system
+        env:
+          TAG: sha-${{ github.sha }}
+        run: |
+          export TAG="sha-$(git rev-parse --short HEAD)"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          docker compose -f docker-compose.ci.yml up -d
+          docker compose -f docker-compose.ci.yml ps
+
+      - name: Wait for readiness
+        run: |
+          ./ci/wait-for.sh http://localhost:8001/health  90 api-python
+          ./ci/wait-for.sh http://localhost:8002/health  90 api-node
+          ./ci/wait-for.sh http://localhost:8080/healthz 90 frontend
+
+      - name: Run the system test
+        id: systest
+        run: |
+          EXPECTED_SHA="sha-$(git rev-parse --short HEAD)" ./ci/system-test.sh \
+            | tee /tmp/system-test-output.txt
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p /tmp/diag
+          docker compose -f docker-compose.ci.yml ps -a    > /tmp/diag/ps.txt      2>&1 || true
+          docker compose -f docker-compose.ci.yml logs --no-color --timestamps \
+                                                            > /tmp/diag/all.log    2>&1 || true
+          for s in api-python api-node frontend; do
+            docker compose -f docker-compose.ci.yml logs --no-color "$s" \
+                                                            > "/tmp/diag/$s.log"   2>&1 || true
+          done
+          docker ps -a                                      > /tmp/diag/docker-ps.txt 2>&1 || true
+          cp /tmp/system-test-output.txt /tmp/diag/ 2>/dev/null || true
+          ls -la /tmp/diag
+
+      - name: Write the run summary
+        if: always()
+        run: |
+          {
+            echo "## System test"
+            echo ""
+            if [ "${{ steps.systest.outcome }}" = "success" ]; then
+              echo "Result: **passed**"
+            else
+              echo "Result: **FAILED**"
+            fi
+            echo ""
+            echo '```'
+            cat /tmp/system-test-output.txt 2>/dev/null || echo "no output captured"
+            echo '```'
+            echo ""
+            echo "<details><summary>Container states</summary>"
+            echo ""
+            echo '```'
+            cat /tmp/diag/ps.txt 2>/dev/null || true
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: system-test-diagnostics
+          path: /tmp/diag/
+          retention-days: 5
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.ci.yml down -v
+
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, python, node, frontend]
+    needs: [changes, python, node, frontend, build, verify-artifact, system-test]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -148,4 +424,4 @@ jobs:
               exit 1
             fi
           done
-          echo "All required jobs succeeded or were skipped."
+          echo "All required jobs succeeded or were skipped..."
