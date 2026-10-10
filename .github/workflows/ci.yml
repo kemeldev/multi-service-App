@@ -276,7 +276,7 @@ jobs:
           IMG="msa/${{ matrix.service.name }}:${{ steps.ref.outputs.tag }}"
           mkdir -p /tmp/scan
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            -v /tmp/scan:/out aquasec/trivy:${TRIVY_VERSION} \
+            -v /tmp/scan:/out "aquasec/trivy:${TRIVY_VERSION}" \
             image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
             --format table --output /out/vulns.txt "$IMG"
           cat /tmp/scan/vulns.txt
@@ -291,7 +291,7 @@ jobs:
         run: |
           IMG="msa/${{ matrix.service.name }}:${{ steps.ref.outputs.tag }}"
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            -v /tmp/scan:/out aquasec/trivy:${TRIVY_VERSION} \
+            -v /tmp/scan:/out "aquasec/trivy:${TRIVY_VERSION}" \
             image --format cyclonedx --output /out/sbom.json "$IMG"
           ls -lh /tmp/scan/sbom.json
 
@@ -306,7 +306,7 @@ jobs:
         run: |
           IMG="msa/${{ matrix.service.name }}:${{ steps.ref.outputs.tag }}"
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy:${TRIVY_VERSION} \
+            "aquasec/trivy:${TRIVY_VERSION}" \
             image --scanners vuln --severity CRITICAL --ignore-unfixed \
             --exit-code 1 "$IMG"
 
@@ -392,7 +392,8 @@ jobs:
         env:
           TAG: sha-${{ github.sha }}
         run: |
-          export TAG="sha-$(git rev-parse --short HEAD)"
+          TAG="sha-$(git rev-parse --short HEAD)"
+          export TAG
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           docker compose -f docker-compose.ci.yml up -d
           docker compose -f docker-compose.ci.yml ps
