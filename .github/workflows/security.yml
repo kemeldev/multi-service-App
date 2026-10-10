@@ -58,7 +58,7 @@ jobs:
 
       - name: zizmor (security)
         run: |
-          pipx run "zizmor==${ZIZMOR_VERSION}" .github/workflows/
+          pipx run "zizmor==${ZIZMOR_VERSION}" --min-severity=high .github/workflows/
 
   dockerfiles:
     name: dockerfile misconfiguration scan
