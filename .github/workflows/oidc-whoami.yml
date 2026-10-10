@@ -38,4 +38,4 @@ jobs:
             echo "UNEXPECTED: a feature branch was trusted. Check the trust policy sub condition."
             exit 1
           fi
-          echo "EXPECTED: the trust policy rejected a non-main branch."
+          echo ".EXPECTED: the trust policy rejected a non-main branch."
