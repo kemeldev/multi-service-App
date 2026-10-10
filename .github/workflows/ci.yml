@@ -14,7 +14,7 @@ env:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   changes:
@@ -459,11 +459,126 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose -f docker-compose.ci.yml down -v
+  
+  publish:
+    name: publish ${{ matrix.service.name }} to ECR
+    needs: [changes, build, verify-artifact, system-test]
+    if: >-
+      always() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.changes.outputs.any == 'true' &&
+      needs.build.result == 'success' &&
+      needs.verify-artifact.result == 'success' &&
+      (needs.system-test.result == 'success' || needs.system-test.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.matrix) }}
+    steps:
+      - name: Validate configuration
+        env:
+          ROLE: ${{ vars.AWS_ECR_PUSH_ROLE_ARN }}
+          REGION: ${{ vars.AWS_REGION }}
+        run: |
+          : "${ROLE:?AWS_ECR_PUSH_ROLE_ARN repository variable is empty}"
+          : "${REGION:?AWS_REGION repository variable is empty}"
+
+      - name: Download the tested image
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: image-${{ matrix.service.name }}
+          path: /tmp/incoming
+
+      - name: Load it
+        id: load
+        env:
+          NAME: ${{ matrix.service.name }}
+        run: |
+          LOADED=$(gunzip -c "/tmp/incoming/${NAME}.tar.gz" | docker load | sed -n 's/^Loaded image: //p' | head -1)
+          echo "loaded: $LOADED"
+          echo "image=$LOADED"      >> "$GITHUB_OUTPUT"
+          echo "tag=${LOADED##*:}"  >> "$GITHUB_OUTPUT"
+
+      - name: Get AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.AWS_ECR_PUSH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+
+      - name: Publish (idempotent) and verify content
+        id: publish
+        env:
+          NAME: ${{ matrix.service.name }}
+          LOADED: ${{ steps.load.outputs.image }}
+          TAG: ${{ steps.load.outputs.tag }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          REPO="msa/${NAME}"
+          TARGET="${REGISTRY}/${REPO}:${TAG}"
+          LOCAL_ID=$(docker image inspect --format '{{.Id}}' "$LOADED")
+
+          if aws ecr describe-images --repository-name "$REPO" --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+            STATE=existing
+            echo "tag $TAG already exists in $REPO"
+          else
+            STATE=new
+            docker tag "$LOADED" "$TARGET"
+            docker push "$TARGET"
+          fi
+
+          DIGEST=$(aws ecr describe-images --repository-name "$REPO" --image-ids imageTag="$TAG" \
+                   --query 'imageDetails[0].imageDigest' --output text)
+          CONFIG=$(aws ecr batch-get-image --repository-name "$REPO" --image-ids imageTag="$TAG" \
+                   --query 'images[0].imageManifest' --output text | jq -r '.config.digest // empty')
+
+          echo "local image id : $LOCAL_ID"
+          echo "ECR config     : $CONFIG"
+          echo "ECR digest     : $DIGEST"
+
+          if [ "$LOCAL_ID" = "$CONFIG" ] || [ "$LOCAL_ID" = "$DIGEST" ]; then
+            echo "VERIFIED: ECR holds exactly the image that passed testing."
+          elif [ "$STATE" = "existing" ]; then
+            echo "::warning::${REPO}:${TAG} already exists with different content (a re-run rebuilt the image). The first published artifact for this commit stays canonical."
+          else
+            echo "MISMATCH after a fresh push - this should never happen."
+            exit 1
+          fi
+
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          jq -n --arg s "$NAME" --arg t "$TAG" --arg d "$DIGEST" \
+                --arg i "${REGISTRY}/${REPO}@${DIGEST}" \
+                '{service:$s, tag:$t, digest:$d, image:$i}' > "/tmp/published-${NAME}.json"
+          cat "/tmp/published-${NAME}.json"
+
+          {
+            echo "### Published: ${NAME}"
+            echo "- tag: \`${TAG}\`"
+            echo "- digest: \`${DIGEST}\`"
+            echo "- state: ${STATE}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record what was published
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: published-${{ matrix.service.name }}
+          path: /tmp/published-${{ matrix.service.name }}.json
+          retention-days: 30
 
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, python, node, frontend, build, verify-artifact, system-test]
+    needs: [changes, python, node, frontend, build, verify-artifact, system-test, publish]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
