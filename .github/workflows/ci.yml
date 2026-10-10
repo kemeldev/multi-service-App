@@ -189,9 +189,11 @@ jobs:
         id: ref
         run: |
           SHORT=$(git rev-parse --short HEAD)
-          echo "tag=sha-$SHORT" >> "$GITHUB_OUTPUT"
-          echo "image=localhost:5000/msa/${{ matrix.service.name }}" >> "$GITHUB_OUTPUT"
-          echo "stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=sha-$SHORT"
+            echo "image=localhost:5000/msa/${{ matrix.service.name }}"
+            echo "stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Lint the Dockerfile
         run: |
@@ -348,7 +350,7 @@ jobs:
             -e HEARTBEAT_ENABLED=false \
             -e DB_HOST=203.0.113.1 -e DB_CONNECT_TIMEOUT=2 \
             ${{ steps.load.outputs.image }}
-          for i in $(seq 1 20); do
+          for _ in $(seq 1 20); do
             curl -fsS "http://localhost:19100${{ matrix.service.health }}" >/dev/null 2>&1 && break
             sleep 1
           done
