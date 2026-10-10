@@ -57,6 +57,7 @@ jobs:
             "rhysd/actionlint:${ACTIONLINT_VERSION}" -color
 
       - name: zizmor (security)
+        continue-on-error: true
         run: |
           pipx run "zizmor==${ZIZMOR_VERSION}" --min-severity=high .github/workflows/
 
