@@ -28,4 +28,4 @@ services:
       NODE_API: "/api/node"
       POLL_MS: "5000"
     ports:
-      - "8080:80"
+      - "8080:8080"
