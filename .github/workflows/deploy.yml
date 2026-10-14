@@ -1,0 +1,194 @@
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Image tag to deploy (sha-xxxxxxx)"
+        required: true
+        type: string
+      services:
+        description: "Space-separated services"
+        required: false
+        type: string
+        default: "api-python api-node frontend"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to deploy (sha-xxxxxxx)"
+        required: true
+        type: string
+      services:
+        description: "Space-separated services"
+        required: false
+        type: string
+        default: "api-python api-node frontend"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: plan deployment
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - name: Validate inputs and build the service list
+        id: m
+        env:
+          TAG: ${{ inputs.tag }}
+          SERVICES: ${{ inputs.services }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^sha-[0-9a-f]{7,40}$ ]]; then
+            echo "Invalid tag '$TAG' - expected sha-<hex>"; exit 1
+          fi
+          MATRIX='[]'
+          for s in $SERVICES; do
+            case "$s" in
+              api-python) ecs=python;   check=/api/py/api/info ;;
+              api-node)   ecs=node;     check=/api/node/api/info ;;
+              frontend)   ecs=frontend; check=/config.js ;;
+              *) echo "Unknown service '$s'"; exit 1 ;;
+            esac
+            MATRIX=$(printf '%s' "$MATRIX" | jq -c \
+              --arg r "$s" --arg e "$ecs" --arg c "$check" \
+              '. + [{repo:$r, ecs:$e, check:$c}]')
+          done
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Deploying $TAG to: $SERVICES"
+
+  deploy:
+    name: deploy ${{ matrix.svc.repo }}
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: deploy-prod-${{ matrix.svc.repo }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        svc: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Validate configuration
+        env:
+          ROLE: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          REGION: ${{ vars.AWS_REGION }}
+          CLUSTER: ${{ vars.ECS_CLUSTER }}
+          APP: ${{ vars.APP_URL }}
+        run: |
+          : "${ROLE:?AWS_DEPLOY_ROLE_ARN is empty}"
+          : "${REGION:?AWS_REGION is empty}"
+          : "${CLUSTER:?ECS_CLUSTER is empty}"
+          : "${APP:?APP_URL is empty}"
+
+      - name: Get AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: "1. Resolve the tag to an immutable digest"
+        id: image
+        env:
+          REPO: msa/${{ matrix.svc.repo }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          DIGEST=$(aws ecr describe-images --repository-name "$REPO" \
+            --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text)
+          IMAGE="${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com/${REPO}@${DIGEST}"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "will deploy: $IMAGE"
+
+      - name: "2. Fetch the latest recipe for this service"
+        env:
+          FAMILY: ${{ matrix.svc.ecs }}
+        run: |
+          aws ecs describe-task-definition --task-definition "$FAMILY" \
+            --query taskDefinition > /tmp/td.json
+          echo "based on: $(jq -r .taskDefinitionArn /tmp/td.json)"
+
+      - name: "3a. Put the new image into the recipe"
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@8d79160660ad39c402a16e5fc7cd2a32e8f7d6b7 # v1
+        with:
+          task-definition: /tmp/td.json
+          container-name: ${{ matrix.svc.ecs }}
+          image: ${{ steps.image.outputs.image }}
+
+      - name: "3b + 4. Register the revision and roll it out"
+        id: deploy
+        uses: aws-actions/amazon-ecs-deploy-task-definition@a00d4d57ac0de1a99b39fe469f3d898d38717c2b # v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          service: ${{ matrix.svc.ecs }}
+          wait-for-service-stability: true
+          wait-for-minutes: 10
+
+      - name: "Verify: is ECS really running what we deployed?"
+        env:
+          CLUSTER: ${{ vars.ECS_CLUSTER }}
+          SERVICE: ${{ matrix.svc.ecs }}
+          EXPECTED: ${{ steps.deploy.outputs.task-definition-arn }}
+        run: |
+          set -euo pipefail
+          CURRENT=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+            --query 'services[0].taskDefinition' --output text)
+          STATE=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+            --query 'services[0].deployments[?status==`PRIMARY`].rolloutState | [0]' --output text)
+          echo "expected : $EXPECTED"
+          echo "running  : $CURRENT"
+          echo "rollout  : $STATE"
+          if [ "$CURRENT" != "$EXPECTED" ]; then
+            echo "::error::ECS is not running the revision we deployed - it was probably ROLLED BACK by the circuit breaker."
+            exit 1
+          fi
+          [ "$STATE" = "COMPLETED" ] || { echo "::error::rollout state is $STATE"; exit 1; }
+
+      - name: "Verify: does it answer from the outside, like a user?"
+        env:
+          URL: ${{ vars.APP_URL }}${{ matrix.svc.check }}
+          REPO: ${{ matrix.svc.repo }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          for i in $(seq 1 30); do
+            BODY=$(curl -fsS --max-time 5 "$URL" 2>/dev/null || true)
+            if [ "$REPO" = "frontend" ]; then
+              if echo "$BODY" | grep -q "/api/py"; then
+                echo "frontend serving runtime config"; exit 0
+              fi
+            else
+              GOT=$(echo "$BODY" | jq -r '.commit_sha // empty' 2>/dev/null || true)
+              if [ "$GOT" = "$TAG" ]; then
+                echo "$REPO is live and serving $GOT"; exit 0
+              fi
+              echo "attempt $i: serving '${GOT:-nothing}', want '$TAG'"
+            fi
+            sleep 4
+          done
+          echo "::error::$URL never served $TAG"; exit 1
+
+      - name: Summary
+        if: always()
+        env:
+          REPO: ${{ matrix.svc.repo }}
+          TAG: ${{ inputs.tag }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          TD: ${{ steps.deploy.outputs.task-definition-arn }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          {
+            echo "### Deploy ${REPO}: ${OUTCOME}"
+            echo "- tag: \`${TAG}\`"
+            echo "- image: \`${IMAGE}\`"
+            echo "- revision: \`${TD}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
