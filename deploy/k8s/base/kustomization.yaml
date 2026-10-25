@@ -1,0 +1,46 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Every resource below is placed in this namespace.
+namespace: multi-service-app
+
+# Labels added to every object's metadata, for filtering and ownership.
+# includeSelectors: false is important: selectors are immutable. See Step 6.1.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: multi-service-app
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false
+
+resources:
+  - namespace.yaml
+  # Database
+  - postgres-statefulset.yaml
+  - postgres-service.yaml
+  # APIs
+  - python-api-deployment.yaml
+  - python-api-service.yaml
+  - node-api-deployment.yaml
+  - node-api-service.yaml
+  # Frontend
+  - react-frontend-deployment.yaml
+  - react-frontend-service.yaml
+  # Scheduled work
+  - cleanup-cronjob.yaml
+  # Routing
+  - httproute.yaml
+  # Availability and access
+  - pdbs.yaml
+  - deployer-rbac.yaml
+
+# ConfigMaps are generated from .env files rather than written as YAML.
+# Each generated name gets a hash of its contents appended. See Step 4.
+configMapGenerator:
+  - name: postgres-config
+    envs: [config/postgres.env]
+  - name: python-api-config
+    envs: [config/python-api.env]
+  - name: node-api-config
+    envs: [config/node-api.env]
+  - name: cleanup-config
+    envs: [config/cleanup.env]

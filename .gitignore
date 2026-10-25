@@ -3,3 +3,12 @@ __pycache__/
 .venv/
 dist/
 .env
+db.env
+api-python/.env
+api-node/.env
+
+# Kubernetes secret inputs: never commit these
+deploy/k8s/overlays/*/secrets/*.env
+
+# Kubernetes secret inputs: never commit these
+deploy/k8s/overlays/*/secrets/*.env

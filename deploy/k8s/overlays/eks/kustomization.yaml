@@ -1,0 +1,97 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+labels:
+  - pairs:
+      environment: eks
+    includeSelectors: false
+
+# No secretGenerator here. On EKS, db-credentials is created by the
+# External Secrets Operator from AWS Secrets Manager, so the value never
+# exists in a file at all. The Pods reference the plain name db-credentials.
+
+# Images come from a registry the cluster can reach.
+# Lab 4 builds and pushes these. Change the account to yours.
+images:
+  - name: node-api
+    newName: ghcr.io/kemeldev/node-api
+    newTag: "0.2.0"
+  - name: python-api
+    newName: ghcr.io/kemeldev/python-api
+    newTag: "0.1.0"
+  - name: react-frontend
+    newName: ghcr.io/kemeldev/react-frontend
+    newTag: "0.1.0"
+  - name: heartbeat-cleanup
+    newName: ghcr.io/kemeldev/heartbeat-cleanup
+    newTag: "0.1.0"
+  - name: postgres
+    newTag: "16-alpine"
+
+# More copies, because a cloud cluster has more capacity and
+# a single replica cannot be drained without downtime (Sub-lab 3.6 §5.6).
+replicas:
+  - name: node-api
+    count: 3
+  - name: python-api
+    count: 2
+  - name: react-frontend
+    count: 2
+
+patches:
+  # 1. Spread node-api across availability zones instead of nodes.
+  #    This is the one-line change promised in Sub-lab 3.6 §4.2.
+  - target:
+      kind: Deployment
+      name: node-api
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/topologySpreadConstraints/0/topologyKey
+        value: topology.kubernetes.io/zone
+
+  # 2. EBS-backed storage instead of KinD's local-path.
+  - target:
+      kind: StatefulSet
+      name: postgres-db
+    patch: |-
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: gp3
+
+  # 3. Attach the route to the EKS cluster's Gateway.
+  - target:
+      kind: HTTPRoute
+      name: msa-route
+    patch: |-
+      - op: replace
+        path: /spec/parentRefs/0/name
+        value: eks-gateway
+      - op: replace
+        path: /spec/parentRefs/0/namespace
+        value: gateway-system
+
+  # 4. A larger database. Strategic merge style: describe the shape,
+  #    and Kustomize merges it, matching the container by its name.
+  - target:
+      kind: StatefulSet
+      name: postgres-db
+    patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: postgres-db
+      spec:
+        template:
+          spec:
+            containers:
+              - name: postgres
+                resources:
+                  requests:
+                    cpu: 500m
+                    memory: 1Gi
+                  limits:
+                    cpu: 500m
+                    memory: 1Gi

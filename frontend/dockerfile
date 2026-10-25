@@ -1,0 +1,23 @@
+# ---- build stage ----
+FROM node:20-alpine AS build
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+# Vite bakes these into the JS bundle at build time — see Lab notes on
+# why this can't be a runtime env var. Both point through the proxy,
+# same-origin, so there's no CORS to configure anywhere.
+ARG VITE_PY_API=/api/py
+ARG VITE_NODE_API=/api/node
+ENV VITE_PY_API=$VITE_PY_API
+ENV VITE_NODE_API=$VITE_NODE_API
+
+RUN npm run build
+
+# ---- runtime stage ----
+FROM nginxinc/nginx-unprivileged:1.27-alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 8080

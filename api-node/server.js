@@ -76,6 +76,13 @@ const state = {
   startedAt: new Date().toISOString(),
 };
 
+// ---------------------------------------------------------------
+// Graceful shutdown state  (changed to run lab 3.5 step 3.5)
+// ---------------------------------------------------------------
+let shuttingDown = false;
+let heartbeatTimer = null;
+
+
 // A pool with no live DB emits errors on idle clients - swallow them so the
 // process does not exit while Postgres is still being provisioned.
 // The heartbeat loop will notice the failure and update the state accordingly.
@@ -334,8 +341,22 @@ app.get('/', async (_req, res) => {
 });
 
 /** Liveness + readiness - does not touch the DB. Fails when /admin/ready has flipped the flag off. */
+// app.get('/health', (_req, res) => {
+//   res.status(state.ready ? 200 : 503).json({ status: state.ready ? 'ok' : 'error', service: SERVICE_NAME });
+// });
+/** Liveness + readiness - does not touch the DB. Fails when /admin/ready has flipped the flag off or shutdown has started. */
 app.get('/health', (_req, res) => {
-  res.status(state.ready ? 200 : 503).json({ status: state.ready ? 'ok' : 'error', service: SERVICE_NAME });
+  if (shuttingDown) {
+    return res.status(503).json({
+      status: 'shutting down',
+      service: SERVICE_NAME,
+    });
+  }
+
+  res.status(state.ready ? 200 : 503).json({
+    status: state.ready ? 'ok' : 'error',
+    service: SERVICE_NAME,
+  });
 });
 
 /** Admin: flips the readiness flag that /health reports on. No auth - lab use only. */
@@ -349,9 +370,72 @@ app.get('/api/info', (_req, res) => res.json(buildInfo()));
 /** DB clock + persistent-state proof. Always 200, even when the DB is down. */
 app.get('/api/db', async (_req, res) => res.json(await buildDb()));
 
-app.listen(PORT, '0.0.0.0', () => {
+
+// app.listen(PORT, '0.0.0.0', () => {
+//   console.log(`[${SERVICE_NAME}] listening on http://0.0.0.0:${PORT}`);
+//   console.log(`[${SERVICE_NAME}] db target ${DB_TARGET}`);
+//   heartbeat();
+//   setInterval(heartbeat, TICK_MS);
+// });
+// ---------------------------------------------------------------
+// Start server + graceful shutdown
+// ---------------------------------------------------------------
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`[${SERVICE_NAME}] listening on http://0.0.0.0:${PORT}`);
   console.log(`[${SERVICE_NAME}] db target ${DB_TARGET}`);
+
   heartbeat();
-  setInterval(heartbeat, TICK_MS);
+  heartbeatTimer = setInterval(heartbeat, TICK_MS);
 });
+
+// Make sure idle keep-alive connections do not outlive us.
+// Without this, server.close() can wait a long time for connections
+// that are open but not carrying a request.
+server.keepAliveTimeout = 5000;
+server.headersTimeout = 6000;
+
+function shutdown(signal) {
+  if (shuttingDown) return;
+
+  shuttingDown = true;
+  state.ready = false;
+
+  console.log(`[shutdown] ${signal} received, draining connections`);
+
+  // Stop the background heartbeat loop.
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+  }
+
+  // Stop accepting new connections. The callback runs once existing
+  // active requests have finished.
+  server.close(async () => {
+    console.log('[shutdown] all HTTP connections closed');
+
+    try {
+      await pool.end();
+      console.log('[shutdown] Postgres pool closed');
+    } catch (err) {
+      console.log(`[shutdown] error closing Postgres pool: ${describe(err)}`);
+    }
+
+    console.log('[shutdown] exiting cleanly');
+    process.exit(0);
+  });
+
+  // Close idle keep-alive connections so server.close() does not wait on them.
+  // Available in Node 18.2 and later.
+  if (typeof server.closeIdleConnections === 'function') {
+    server.closeIdleConnections();
+  }
+
+  // Safety net. This must be shorter than terminationGracePeriodSeconds
+  // in the Kubernetes Deployment.
+  setTimeout(() => {
+    console.log('[shutdown] drain timed out, forcing exit');
+    process.exit(0);
+  }, 15000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

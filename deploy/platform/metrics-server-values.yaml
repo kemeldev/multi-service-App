@@ -1,0 +1,4 @@
+# KinD only. The kubelet's serving certificate is self-signed here.
+# Never use this flag on EKS; see Sub-lab 3.6 §1.2.
+args:
+  - --kubelet-insecure-tls

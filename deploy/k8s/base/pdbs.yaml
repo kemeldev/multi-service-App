@@ -1,0 +1,29 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: node-api-pdb
+spec:
+  maxUnavailable: 1          # never voluntarily go below 2 ready Pods
+  selector:
+    matchLabels:
+      app: node-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: python-api-pdb
+spec:
+  maxUnavailable: 1        # expressed the safer way
+  selector:
+    matchLabels:
+      app: python-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: react-frontend-pdb
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: react-frontend

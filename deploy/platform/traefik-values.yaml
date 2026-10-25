@@ -1,0 +1,48 @@
+# Traefik v3 for the lab3 KinD cluster.
+# Exposed via NodePort on 30080/30443 to match kind-lab3.yaml's extraPortMappings.
+
+deployment:
+  replicas: 1
+
+service:
+  spec:
+    type: NodePort
+
+ports:
+  web:
+    port: 8000
+    exposedPort: 80
+    nodePort: 30080
+    protocol: TCP
+
+  websecure:
+    port: 8443
+    exposedPort: 443
+    nodePort: 30443
+    protocol: TCP
+
+providers:
+  kubernetesIngress:
+    enabled: true
+
+  kubernetesCRD:
+    enabled: true
+
+  kubernetesGateway:
+    enabled: true
+
+gateway:
+  enabled: true
+  listeners:
+    web:
+      port: 8000
+      protocol: HTTP
+      namespacePolicy:
+        from: All
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi

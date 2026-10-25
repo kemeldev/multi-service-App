@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-api
+  labels:
+    app: node-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: node-api
+  template:
+    metadata:
+      labels:
+        app: node-api
+    spec:
+      automountServiceAccountToken: false     # it never calls the K8s API
+      securityContext:                      # Pod level: applies to ALL containers,
+        runAsNonRoot: true                  # including the init container
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: node-api
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for postgres-db:5432 ..."
+              until pg_isready -h postgres-db -p 5432 -q; do
+                echo "  not ready, retrying in 2s"
+                sleep 2
+              done
+              echo "postgres-db is accepting connections"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70                     # 'postgres' in the alpine image
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      containers:
+        - name: node-api
+          image: node-api:0.2.0
+          imagePullPolicy: IfNotPresent        # required: kind-loaded, not in a registry
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
+          ports:
+            - name: http
+              containerPort: 8002              # <-- VERIFY against your app
+          envFrom:
+            - configMapRef:
+                name: node-api-config
+          env:
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: password
+            # Downward API — makes 3.5's load-balancing exercise legible
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 3
+            failureThreshold: 20               # up to 60s to start
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+              # no initialDelaySeconds — startupProbe handles the boot window
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 75m          # observed ~40-55m under load, with headroom
+              memory: 96Mi      # observed peak 77Mi, with headroom
+            limits:
+              memory: 256Mi     # keep the memory limit; no CPU limit
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault

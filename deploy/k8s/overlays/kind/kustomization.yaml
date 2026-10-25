@@ -1,0 +1,44 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Start from the application.
+resources:
+  - ../../base
+
+# Identify the environment on every object.
+labels:
+  - pairs:
+      environment: kind
+    includeSelectors: false
+
+# Credentials for this environment, from a git-ignored file.
+secretGenerator:
+  - name: db-credentials
+    envs:
+      - secrets/db-credentials.env
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+# The record of exactly which version runs in this environment.
+# A pipeline changes these lines; nothing else needs to change. See Step 10.
+images:
+  - name: node-api
+    newTag: "0.2.0"
+  - name: python-api
+    newTag: "0.1.0"
+  - name: react-frontend
+    newTag: "0.1.0"
+  - name: heartbeat-cleanup
+    newTag: "0.1.0"
+  - name: postgres
+    newTag: "16-alpine"
+
+# Replica counts for this environment.
+replicas:
+  - name: node-api
+    count: 2
+  - name: python-api
+    count: 1
+  - name: react-frontend
+    count: 1

@@ -1,0 +1,112 @@
+services:
+  react-frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_PY_API: /api/py
+        VITE_NODE_API: /api/node
+    image: react-frontend:0.1.0
+    container_name: react-frontend
+    networks:
+      - frontend-net
+    mem_limit: 256m
+    cpus: 0.5
+    restart: unless-stopped
+
+  python-api:
+    build:
+      context: ./api-python
+    image: python-api:0.1.0
+    container_name: python-api
+    env_file:
+      - api-python/.env
+    networks:
+      - backend-net
+      - db-net
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+    mem_limit: 256m
+    cpus: 0.5
+    restart: unless-stopped
+
+  node-api:
+    build:
+      context: ./api-node
+    image: node-api:0.1.0
+    container_name: node-api
+    env_file:
+      - api-node/.env
+    networks:
+      - backend-net
+      - db-net
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+    mem_limit: 256m
+    cpus: 0.5
+    restart: unless-stopped
+
+  postgres-db:
+    image: postgres:16-alpine
+    container_name: postgres-db
+    env_file:
+      - db.env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - db-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    mem_limit: 512m
+    cpus: 1.0
+    restart: unless-stopped
+  
+  edge-proxy:
+    build:
+      context: ./proxy
+    image: edge-proxy:0.1.0
+    container_name: edge-proxy
+    ports:
+      - "80:8080"
+    networks:
+      - frontend-net
+      - backend-net
+    depends_on:
+      - react-frontend
+      - python-api
+      - node-api
+    mem_limit: 128m
+    cpus: 0.5
+    restart: unless-stopped
+  
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: cadvisor
+    privileged: true
+    ports:
+      - "8081:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    devices:
+      - /dev/kmsg
+    restart: unless-stopped
+
+networks:
+  frontend-net:
+    driver: bridge
+  backend-net:
+    driver: bridge
+  db-net:
+    driver: bridge
+
+volumes:
+  pgdata:

@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-db
+  labels:
+    app: postgres
+spec:
+  serviceName: postgres-db            # the governing headless Service from Step 5
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  # What happens to the PVCs when the StatefulSet is deleted or scaled down.
+  # Retain is the default and the safe choice for a database. See Step 9.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  updateStrategy:
+    type: RollingUpdate               # safe here; see Step 7.5
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      automountServiceAccountToken: false
+      # The official image stops with SIGINT, which is Postgres's "fast shutdown":
+      # it ends sessions, writes a final checkpoint, and exits cleanly.
+      # A generous grace period lets that checkpoint finish, so the next start
+      # does not need crash recovery.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            - configMapRef:
+                name: postgres-config
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data                    # matches volumeClaimTemplates below
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 100m
+              memory: 256Mi
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -h 127.0.0.1"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -h 127.0.0.1"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -h 127.0.0.1"]
+            periodSeconds: 5
+            failureThreshold: 30            # up to 150s, e.g. for crash recovery
+  # One PVC is created per Pod, from this template.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: postgres
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: standard
+        resources:
+          requests:
+            storage: 2Gi

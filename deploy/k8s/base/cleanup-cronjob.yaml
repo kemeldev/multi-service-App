@@ -1,0 +1,54 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: heartbeat-cleanup
+  labels:
+    app: heartbeat-cleanup
+spec:
+  schedule: "*/2 * * * *"          # every 2 minutes; a real system might use "*/30 * * * *"
+  timeZone: "Etc/UTC"               # state it explicitly; see 6.6
+  concurrencyPolicy: Forbid         # see Step 7
+  successfulJobsHistoryLimit: 3     # keep the last 3 successful Jobs
+  failedJobsHistoryLimit: 3         # keep the last 3 failed Jobs
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app: heartbeat-cleanup
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          containers:
+            - name: cleanup
+              image: heartbeat-cleanup:0.1.0
+              imagePullPolicy: IfNotPresent
+              envFrom:
+                - configMapRef:
+                    name: cleanup-config
+              env:
+                - name: DB_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-credentials
+                      key: username
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-credentials
+                      key: password
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+              securityContext:
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                seccompProfile:
+                  type: RuntimeDefault
